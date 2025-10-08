@@ -11,7 +11,7 @@ Utilise Pydantic Settings pour la validation automatique des types
 et le chargement depuis les variables d'environnement et fichiers .env
 """
 
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):

@@ -7,7 +7,12 @@ Ce module fournit des endpoints pour :
 - Informations de version et configuration
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import Dict
+import time
+
+from app.services.ai_startup import get_ai_services_status
 from datetime import datetime
 
 from app.models.schemas import HealthResponse
@@ -30,15 +35,12 @@ async def health_check():
     Returns:
         HealthResponse: Informations de santé de l'API
     """
-    # TODO: Ajouter des vérifications réelles des services
-    # - Connectivité aux modèles IA
-    # - Espace disque disponible
-    # - Mémoire utilisée
-    # - État des services externes
+    # Récupération de l'état actuel des services IA
+    ai_services_status = get_ai_services_status()
     
     models_status = {
-        "text_model": False,  # À implémenter quand le service IA sera prêt
-        "image_model": False,  # À implémenter quand le service IA sera prêt
+        "text_model": ai_services_status.get("narrative", False),
+        "image_model": ai_services_status.get("image", False),
     }
     
     return HealthResponse(
@@ -47,3 +49,34 @@ async def health_check():
         version="1.0.0",
         models_loaded=models_status
     )
+
+
+@router.get("/health/ai-services")
+async def ai_services_health():
+    """
+    État spécifique des services IA
+    
+    Retourne l'état détaillé de tous les services IA :
+    - Narrative Service (génération de texte)
+    - Image Service (génération d'images)
+    - Memory Service (gestion de la mémoire)
+    - Story Service (orchestration)
+    """
+    services_status = get_ai_services_status()
+    
+    active_services = sum(services_status.values())
+    total_services = len(services_status)
+    
+    if active_services == total_services:
+        overall_status = "operational"
+    elif active_services > 0:
+        overall_status = "partial"
+    else:
+        overall_status = "unavailable"
+    
+    return {
+        "overall_status": overall_status,
+        "services": services_status,
+        "summary": f"{active_services}/{total_services} services active",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    }

@@ -6,14 +6,36 @@ Ce fichier configure et lance l'application FastAPI avec :
 - Inclusion des routeurs API
 - Middleware de logging et gestion d'erreurs
 - Documentation automatique Swagger/ReDoc
+- Initialisation automatique des services IA
 """
+
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from app.config import settings
-from app.routers import story, health
+from app.routers import story, health, image
+from app.services.ai_startup import initialize_ai_services
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Gestionnaire du cycle de vie de l'application
+    
+    Cette fonction s'exécute au démarrage et à l'arrêt de l'application
+    pour initialiser les services IA et nettoyer les ressources.
+    """
+    # Démarrage : initialisation des services IA
+    print("🚀 Démarrage de l'application...")
+    await initialize_ai_services()
+    
+    yield  # L'application fonctionne ici
+    
+    # Arrêt : nettoyage des ressources
+    print("🔄 Arrêt de l'application...")
 
 # Création de l'application FastAPI avec métadonnées pour la documentation
 app = FastAPI(
@@ -30,7 +52,8 @@ app = FastAPI(
     """,
     version="1.0.0",
     docs_url="/docs",  # Documentation Swagger
-    redoc_url="/redoc"  # Documentation ReDoc alternative
+    redoc_url="/redoc",  # Documentation ReDoc alternative
+    lifespan=lifespan
 )
 
 # CORS Configuration
@@ -46,8 +69,7 @@ app.add_middleware(
 # Chaque routeur gère un domaine fonctionnel spécifique
 app.include_router(health.router, prefix="/api/v1")
 app.include_router(story.router, prefix="/api/v1")
-# TODO: Ajouter le routeur image quand il sera implémenté
-# app.include_router(image.router, prefix="/api/v1")
+app.include_router(image.router, prefix="/api/v1")
 
 
 @app.get("/")
