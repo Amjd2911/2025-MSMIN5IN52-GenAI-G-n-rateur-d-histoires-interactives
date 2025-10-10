@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
+
 from app.config import settings
 from app.routers import story, health, image
 from app.services.ai_startup import initialize_ai_services
@@ -92,10 +93,12 @@ if __name__ == "__main__":
     Point d'entrée pour lancer l'application en développement
     En production, utiliser un serveur ASGI comme uvicorn, gunicorn, etc.
     """
+    # Désactive temporairement le reload automatique pour éviter les conflits
+    # avec le téléchargement de modèles IA
     uvicorn.run(
         "main:app",
         host=settings.HOST,
         port=settings.PORT,
-        reload=settings.DEBUG,
+        reload=False,  # Désactivé pour éviter les problèmes de reload pendant les downloads
         log_level=settings.LOG_LEVEL.lower()
     )

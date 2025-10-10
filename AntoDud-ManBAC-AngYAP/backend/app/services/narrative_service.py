@@ -14,6 +14,7 @@ Architecture :
 - Cache des modèles chargés pour performance
 """
 
+import os
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from typing import List, Dict, Any, Optional, Tuple
@@ -42,11 +43,22 @@ class NarrativeService:
         """
         # Configuration du logging
         self.logger = logging.getLogger(__name__)
-        
+
+        # Répertoire cache des modèles
+        self.model_cache_dir = settings.MODEL_CACHE_PATH
+        os.makedirs(self.model_cache_dir, exist_ok=True)
+
         # Variables pour le modèle chargé
         self.tokenizer = None
         self.model = None
-        self.device = settings.TEXT_MODEL_DEVICE
+        self.device, self.device_label = self._select_device(settings.TEXT_MODEL_DEVICE)
+        self.logger.info("Narrative model will use device: %s", self.device_label)
+        if self.device.type == "cuda":
+            try:
+                device_name = torch.cuda.get_device_name(self.device.index or 0)
+                self.logger.info("CUDA device detected: %s", device_name)
+            except Exception:
+                pass
         self.model_loaded = False
         
         # Configuration de génération par défaut
@@ -132,7 +144,8 @@ class NarrativeService:
             # Chargement du tokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(
                 settings.TEXT_MODEL_NAME,
-                trust_remote_code=True
+                trust_remote_code=True,
+                cache_dir=self.model_cache_dir
             )
             
             # Configuration du pad_token si nécessaire
@@ -145,12 +158,35 @@ class NarrativeService:
             # Chargement du modèle
             self.model = AutoModelForCausalLM.from_pretrained(
                 settings.TEXT_MODEL_NAME,
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                trust_remote_code=True
+                torch_dtype=self._get_model_dtype(),
+                trust_remote_code=True,
+                cache_dir=self.model_cache_dir
             )
             
             # Déplacement vers le device approprié
-            self.model.to(self.device)
+            try:
+                self.model.to(self.device)
+            except RuntimeError as runtime_error:
+                if self.device.type == "cuda":
+                    self.logger.warning(
+                        "Impossible de charger le modèle sur CUDA (%s). Repli sur CPU.",
+                        runtime_error
+                    )
+                    self.device, self.device_label = torch.device("cpu"), "cpu"
+                    self.model = self.model.to(torch.float32)
+                    self.model = self.model.to(self.device)
+                    self.logger.info("Narrative model fallback device: %s", self.device_label)
+                elif self.device.type == "mps":
+                    self.logger.warning(
+                        "Impossible de charger le modèle sur MPS (%s). Repli sur CPU.",
+                        runtime_error
+                    )
+                    self.device, self.device_label = torch.device("cpu"), "cpu"
+                    self.model = self.model.to(torch.float32)
+                    self.model = self.model.to(self.device)
+                    self.logger.info("Narrative model fallback device: %s", self.device_label)
+                else:
+                    raise
             
             # Mode évaluation pour l'inférence
             self.model.eval()
@@ -163,6 +199,58 @@ class NarrativeService:
             self.logger.error(f"Erreur lors du chargement du modèle: {str(e)}")
             self.model_loaded = False
             return False
+
+    def _select_device(self, configured_device: Optional[str]) -> Tuple[torch.device, str]:
+        """
+        Sélectionne le device à utiliser pour le modèle
+
+        Args:
+            configured_device: Valeur provenant de la configuration
+
+        Returns:
+            Tuple[torch.device, str]: Device torch et libellé lisible
+        """
+        available_cuda = torch.cuda.is_available()
+        mps_backend = getattr(torch.backends, "mps", None)
+        available_mps = bool(mps_backend and mps_backend.is_available())
+
+        normalized = (configured_device or "auto").strip().lower()
+
+        # Gestion des choix explicites
+        if normalized.startswith("cuda"):
+            if available_cuda:
+                device_str = normalized if ":" in normalized else "cuda"
+                return torch.device(device_str), device_str
+            self.logger.warning("CUDA demandé mais indisponible, utilisation du CPU.")
+            return torch.device("cpu"), "cpu"
+
+        if normalized == "mps":
+            if available_mps:
+                return torch.device("mps"), "mps"
+            self.logger.warning("MPS demandé mais indisponible, utilisation du CPU.")
+            return torch.device("cpu"), "cpu"
+
+        if normalized == "cpu":
+            return torch.device("cpu"), "cpu"
+
+        if normalized not in {"auto", ""}:
+            self.logger.warning(
+                "Device '%s' inconnu, activation de la détection automatique.",
+                configured_device
+            )
+
+        # Détection automatique
+        if available_cuda:
+            return torch.device("cuda"), "cuda"
+        if available_mps:
+            return torch.device("mps"), "mps"
+        return torch.device("cpu"), "cpu"
+
+    def _get_model_dtype(self) -> torch.dtype:
+        """Détermine le type de tenseur optimal selon le device."""
+        if self.device.type in {"cuda", "mps"}:
+            return torch.float16
+        return torch.float32
     
     async def generate_intro_scene(self, story: Story) -> Tuple[str, List[str]]:
         """

@@ -11,7 +11,13 @@ Utilise Pydantic Settings pour la validation automatique des types
 et le chargement depuis les variables d'environnement et fichiers .env
 """
 
+import os
+from pathlib import Path
 from pydantic_settings import BaseSettings
+
+# Déterminer le dossier racine du backend (où se trouve ce fichier config.py)
+BACKEND_ROOT = Path(__file__).parent.parent.resolve()
+DATA_ROOT = BACKEND_ROOT / "data"
 
 
 class Settings(BaseSettings):
@@ -32,10 +38,14 @@ class Settings(BaseSettings):
     PORT: int = 8000
 
     # AI Models
-    TEXT_MODEL_NAME: str = "Qwen/Qwen2-7B-Instruct"
-    TEXT_MODEL_DEVICE: str = "cpu"
-    IMAGE_MODEL_NAME: str = "stabilityai/stable-diffusion-xl-base-1.0"
-    IMAGE_MODEL_DEVICE: str = "cpu"
+    TEXT_MODEL_NAME: str = "Qwen/Qwen3-0.6B"
+    TEXT_MODEL_DEVICE: str = "auto"  # "auto" sélectionne CUDA/MPS si disponible
+    IMAGE_MODEL_NAME: str = "stabilityai/sdxl-turbo"
+    IMAGE_MODEL_DEVICE: str = "auto"  # "auto" sélectionne CUDA/MPS si disponible
+    MODEL_CACHE_PATH: str = str(DATA_ROOT / "models")
+
+    # Dev server reload configuration
+    RELOAD_EXCLUDE_PATTERNS: str = "data/**"
 
     # External APIs
     OPENAI_API_KEY: str = ""
@@ -47,8 +57,8 @@ class Settings(BaseSettings):
     DEFAULT_GENRE: str = "fantasy"
 
     # File Storage
-    STORIES_PATH: str = "./data/stories"
-    IMAGES_PATH: str = "./data/images"
+    STORIES_PATH: str = str(DATA_ROOT / "stories")
+    IMAGES_PATH: str = str(DATA_ROOT / "images")
 
     # CORS
     ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"

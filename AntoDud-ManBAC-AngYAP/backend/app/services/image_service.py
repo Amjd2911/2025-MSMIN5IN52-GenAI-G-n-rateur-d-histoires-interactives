@@ -16,6 +16,7 @@ Architecture :
 
 import torch
 from diffusers import StableDiffusionXLPipeline
+from transformers import CLIPTextModel, CLIPTextModelWithProjection
 from PIL import Image
 import requests
 import base64
@@ -48,10 +49,23 @@ class ImageService:
         """
         # Configuration du logging
         self.logger = logging.getLogger(__name__)
-        
+
+        # Répertoire cache des modèles
+        self.model_cache_dir = settings.MODEL_CACHE_PATH
+        os.makedirs(self.model_cache_dir, exist_ok=True)
+
+        self._patch_clip_offload_kwarg()
+
         # Variables pour le pipeline Stable Diffusion
         self.pipeline = None
-        self.device = settings.IMAGE_MODEL_DEVICE
+        self.device, self.device_label = self._select_device(settings.IMAGE_MODEL_DEVICE)
+        self.logger.info("Image generation model will use device: %s", self.device_label)
+        if self.device.type == "cuda":
+            try:
+                device_name = torch.cuda.get_device_name(self.device.index or 0)
+                self.logger.info("CUDA device detected: %s", device_name)
+            except Exception:
+                pass
         self.model_loaded = False
         
         # Configuration de génération par défaut
@@ -145,18 +159,46 @@ class ImageService:
             self.logger.info(f"Chargement du modèle d'images {settings.IMAGE_MODEL_NAME}...")
             
             # Chargement du pipeline Stable Diffusion XL
+            pipeline_kwargs = {
+                "torch_dtype": self._get_model_dtype(),
+                "use_safetensors": True,
+                "low_cpu_mem_usage": False,
+                "device_map": None,
+            }
+
             self.pipeline = StableDiffusionXLPipeline.from_pretrained(
                 settings.IMAGE_MODEL_NAME,
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                use_safetensors=True,
-                variant="fp16" if self.device == "cuda" else None
+                cache_dir=self.model_cache_dir,
+                **pipeline_kwargs
             )
             
             # Déplacement vers le device approprié
-            self.pipeline.to(self.device)
+            try:
+                self.pipeline.to(self.device)
+            except RuntimeError as runtime_error:
+                if self.device.type == "cuda":
+                    self.logger.warning(
+                        "Impossible de charger le pipeline sur CUDA (%s). Repli sur CPU.",
+                        runtime_error
+                    )
+                    self.device, self.device_label = torch.device("cpu"), "cpu"
+                    self.pipeline.to(torch_dtype=torch.float32)
+                    self.pipeline.to(self.device)
+                    self.logger.info("Image pipeline fallback device: %s", self.device_label)
+                elif self.device.type == "mps":
+                    self.logger.warning(
+                        "Impossible de charger le pipeline sur MPS (%s). Repli sur CPU.",
+                        runtime_error
+                    )
+                    self.device, self.device_label = torch.device("cpu"), "cpu"
+                    self.pipeline.to(torch_dtype=torch.float32)
+                    self.pipeline.to(self.device)
+                    self.logger.info("Image pipeline fallback device: %s", self.device_label)
+                else:
+                    raise
             
             # Optimisations mémoire si GPU
-            if self.device == "cuda":
+            if self.device.type == "cuda":
                 self.pipeline.enable_memory_efficient_attention()
                 self.pipeline.enable_vae_slicing()
             
@@ -168,6 +210,69 @@ class ImageService:
             self.logger.error(f"Erreur lors du chargement du modèle d'images: {str(e)}")
             self.model_loaded = False
             return False
+
+    def _patch_clip_offload_kwarg(self) -> None:
+        """Empêche les kwargs inconnus de casser l'init des modèles CLIP."""
+        if getattr(self, "_clip_patched", False):
+            return
+
+        def _wrap_init(cls):
+            original_init = cls.__init__
+            if getattr(original_init, "_offload_patch", False):
+                return
+
+            def patched_init(self, config, *args, **kwargs):
+                kwargs.pop("offload_state_dict", None)
+                return original_init(self, config, *args, **kwargs)
+
+            patched_init._offload_patch = True
+            cls.__init__ = patched_init
+
+        _wrap_init(CLIPTextModel)
+        _wrap_init(CLIPTextModelWithProjection)
+        self._clip_patched = True
+
+    def _select_device(self, configured_device: Optional[str]) -> Tuple[torch.device, str]:
+        """Sélectionne le device optimal pour le pipeline d'images."""
+        available_cuda = torch.cuda.is_available()
+        mps_backend = getattr(torch.backends, "mps", None)
+        available_mps = bool(mps_backend and mps_backend.is_available())
+
+        normalized = (configured_device or "auto").strip().lower()
+
+        if normalized.startswith("cuda"):
+            if available_cuda:
+                device_str = normalized if ":" in normalized else "cuda"
+                return torch.device(device_str), device_str
+            self.logger.warning("CUDA demandé pour les images mais indisponible, utilisation du CPU.")
+            return torch.device("cpu"), "cpu"
+
+        if normalized == "mps":
+            if available_mps:
+                return torch.device("mps"), "mps"
+            self.logger.warning("MPS demandé pour les images mais indisponible, utilisation du CPU.")
+            return torch.device("cpu"), "cpu"
+
+        if normalized == "cpu":
+            return torch.device("cpu"), "cpu"
+
+        if normalized not in {"auto", ""}:
+            self.logger.warning(
+                "Device '%s' inconnu pour le pipeline images, détection automatique activée.",
+                configured_device
+            )
+
+        if available_cuda:
+            return torch.device("cuda"), "cuda"
+        if available_mps:
+            return torch.device("mps"), "mps"
+        return torch.device("cpu"), "cpu"
+
+    def _get_model_dtype(self) -> torch.dtype:
+        """Détermine le dtype optimal en fonction du device."""
+        if self.device.type in {"cuda", "mps"}:
+            return torch.float16
+        return torch.float32
     
     async def generate_scene_image(
         self, 
